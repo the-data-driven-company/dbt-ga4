@@ -17,19 +17,56 @@
     )
 }}
 
-with source as (
+with 
+source as (select *, _table_suffix from {{ source('ga4', 'events') }}),
+
+intraday_partitions as (
+    select distinct _table_suffix, cast(right(_table_suffix, 8) as int64) as date_int
+    from source
+    where _table_suffix like '%intraday_%'
+),
+
+fresh_partitions as (
+    select distinct _table_suffix, cast(right(_table_suffix, 8) as int64) as date_int
+    from source
+    where 
+        _table_suffix like '%fresh_%'
+        and cast(right(_table_suffix, 8) as int64) < (select max(date_int) from intraday_partitions)
+),
+
+final_partitions as (
+        select distinct _table_suffix
+        from {{ source('ga4', 'events') }} source
+        where 
+            _table_suffix not like '%\\_%'
+            and cast(right(_table_suffix, 8) as int64) < (select max(date_int) from fresh_partitions)
+            and cast(right(_table_suffix, 8) as int64) >= {{var('start_date')}}
+),
+
+clean_table_suffix_list as (
+        select _table_suffix from intraday_partitions
+            union distinct
+        select _table_suffix from fresh_partitions
+            union distinct
+        select _table_suffix from final_partitions
+),
+
+source_deduped as (
     select
         {{ ga4.base_select_source() }}
     from {{ source('ga4', 'events') }}
-    where cast(left(replace(_table_suffix, 'intraday_', ''), 8) as int64) >= {{var('start_date')}}
+    where _table_suffix in (
+        select _table_suffix from clean_table_suffix_list
+    )
     {% if is_incremental() %}
-        and parse_date('%Y%m%d', left(replace(_table_suffix, 'intraday_', ''), 8)) in ({{ partitions_to_replace | join(',') }})
+        and parse_date('%Y%m%d', right(_table_suffix, 8)) in ({{ partitions_to_replace | join(',') }})
     {% endif %}
 ),
+
 renamed as (
     select
         {{ ga4.base_select_renamed() }}
-    from source
+    from source_deduped
 )
 
 select * from renamed
